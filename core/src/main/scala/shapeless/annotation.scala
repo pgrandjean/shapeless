@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-6 Alexandre Archambault
+ * Copyright (c) 2015-9 Alexandre Archambault
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -114,7 +114,61 @@ object Annotations {
       def apply() = annotations
     }
 
-  implicit def materialize[A, T, Out <: HList]: Aux[A, T, Out] = macro AnnotationMacros.materializeAnnotations[A, T, Out]
+  implicit def materialize[A, T, Out <: HList]: Aux[A, T, Out] = macro AnnotationMacros.materializeVariableAnnotations[A, T, Out]
+}
+
+/**
+ * Provides the type annotations of type `A` of the fields or constructors of case class-like or sum type `T`.
+ *
+ * If type `T` is case class-like, this type class inspects its fields and provides their type annotations of type `A`. If
+ * type `T` is a sum type, its constructor types are looked for type annotations.
+ *
+ * Type `Out` is an HList having the same number of elements as `T` (number of fields of `T` if `T` is case class-like,
+ * or number of constructors of `T` if it is a sum type). It is made of `None.type` (no annotation on corresponding
+ * field or constructor) and `Some[A]` (corresponding field or constructor is annotated).
+ *
+ * Method `apply` provides an HList of type `Out` made of `None` (corresponding field or constructor not annotated)
+ * or `Some(annotation)` (corresponding field or constructor has annotation `annotation`).
+ *
+ * Note that type annotations must be case class-like for this type class to take them into account.
+ *
+ * Example:
+ * {{{
+ *   case class First(s: String)
+ *
+ *   case class CC(i: Int, s: String @First("a"))
+ *
+ *   val ccFirsts = TypeAnnotations[First, CC]
+ *
+ *   // ccFirsts.Out is  None.type :: Some[First] :: HNil
+ *   // ccFirsts.apply() is
+ *   //   None :: Some(First("a")) :: HNil
+ *
+ * }}}
+ *
+ * This implementation is based on [[shapeless.Annotations]] by Alexandre Archambault.
+ *
+ * @tparam A: type annotation type
+ * @tparam T: case class-like or sum type, whose fields or constructors are annotated
+ *
+ * @author Patrick Grandjean
+ */
+trait TypeAnnotations[A,T] extends DepFn0 with Serializable {
+  type Out <: HList
+}
+
+object TypeAnnotations {
+  def apply[A,T](implicit annotations: TypeAnnotations[A,T]): Aux[A, T, annotations.Out] = annotations
+
+  type Aux[A, T, Out0 <: HList] = TypeAnnotations[A, T] { type Out = Out0 }
+
+  def mkAnnotations[A, T, Out0 <: HList](annotations: => Out0): Aux[A, T, Out0] =
+    new TypeAnnotations[A, T] {
+      type Out = Out0
+      def apply() = annotations
+    }
+
+  implicit def materialize[A, T, Out <: HList]: Aux[A, T, Out] = macro AnnotationMacros.materializeTypeAnnotations[A, T, Out]
 }
 
 @macrocompat.bundle
@@ -162,13 +216,15 @@ class AnnotationMacros(val c: whitebox.Context) extends CaseClassMacros {
     }
   }
 
-  def materializeAnnotations[A: WeakTypeTag, T: WeakTypeTag, Out: WeakTypeTag]: Tree = {
+  def materializeVariableAnnotations[A: WeakTypeTag, T: WeakTypeTag, Out: WeakTypeTag] = materializeAnnotations[A, T, Out](false)
+
+  def materializeTypeAnnotations[A: WeakTypeTag, T: WeakTypeTag, Out: WeakTypeTag] = materializeAnnotations[A, T, Out](true)
+
+  def materializeAnnotations[A: WeakTypeTag, T: WeakTypeTag, Out: WeakTypeTag](typeAnnotation: Boolean): Tree = {
     val annTpe = weakTypeOf[A]
 
     if (!isProduct(annTpe))
       abort(s"$annTpe is not a case class-like type")
-
-    val construct0 = construct(annTpe)
 
     val tpe = weakTypeOf[T]
 
@@ -185,15 +241,13 @@ class AnnotationMacros(val c: whitebox.Context) extends CaseClassMacros {
         fieldsOf(tpe).map { case (name, _) =>
           val paramConstrSym = constructorSyms(name.decodedName.toString)
 
-          paramConstrSym.annotations.collectFirst {
-            case ann if ann.tree.tpe =:= annTpe => construct0(ann.tree.children.tail)
-          }
+          if (typeAnnotation) collectTypeAnnotation(annTpe, paramConstrSym)
+          else collectVariableAnnotation(annTpe, paramConstrSym)
         }
       } else if (isCoproduct(tpe))
         ctorsOf(tpe).map { cTpe =>
-          cTpe.typeSymbol.annotations.collectFirst {
-            case ann if ann.tree.tpe =:= annTpe => construct0(ann.tree.children.tail)
-          }
+          if (typeAnnotation) collectTypeAnnotation(annTpe, cTpe.typeSymbol)
+          else collectVariableAnnotation(annTpe, cTpe.typeSymbol)
         }
       else
         abort(s"$tpe is not case class like or the root of a sealed family of types")
@@ -208,6 +262,27 @@ class AnnotationMacros(val c: whitebox.Context) extends CaseClassMacros {
       case ((_, bound), acc) => pq"_root_.shapeless.::($bound, $acc)"
     }
 
-    q"_root_.shapeless.Annotations.mkAnnotations[$annTpe, $tpe, $outTpe]($outTree)"
+    if (typeAnnotation) q"_root_.shapeless.TypeAnnotations.mkAnnotations[$annTpe, $tpe, $outTpe]($outTree)"
+    else q"_root_.shapeless.Annotations.mkAnnotations[$annTpe, $tpe, $outTpe]($outTree)"
+  }
+
+  def collectVariableAnnotation(annTpe: Type, s: Symbol): Option[Tree] = {
+    val construct0 = construct(annTpe)
+
+    s.annotations.collectFirst {
+      case ann if ann.tree.tpe =:= annTpe => construct0(ann.tree.children.tail)
+    }
+  }
+
+  def collectTypeAnnotation(annTpe: Type, s: Symbol): Option[Tree] = {
+    val construct0 = construct(annTpe)
+
+    s.typeSignature match {
+      case AnnotatedType(annots, _) =>
+        annots.collectFirst {
+          case ann if ann.tree.tpe =:= annTpe => construct0(ann.tree.children.tail)
+        }
+      case _ => None
+    }
   }
 }
