@@ -13,7 +13,7 @@ import sbtcrossproject.CrossProject
 val scala211 = "2.11.12"
 inThisBuild(Seq(
   organization := "com.chuusai",
-  scalaVersion := "2.13.0",
+  scalaVersion := "2.10.7",
   crossScalaVersions := Seq("2.10.7", scala211, "2.12.9", "2.13.0"),
   mimaFailOnNoPrevious := false
 ))
